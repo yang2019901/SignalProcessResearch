@@ -9,8 +9,6 @@ import matplotlib.pyplot as plt
 
 import pdb
 
-# torch.manual_seed(89101659224000)
-
 class Attn(nn.Module):
     def __init__(self, dim_in, dim_out, normalized=False):
         super(Attn, self).__init__()
@@ -20,7 +18,7 @@ class Attn(nn.Module):
         self.dim_in = dim_in
         self.dim_out = dim_out
         self.normalized:bool = normalized
-        self.optim = torch.optim.Adam(self.parameters(), lr=1e-2)
+        self.optim = torch.optim.Adam(self.parameters(), lr=3e-2)
     
     def forward(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor):
         """ Q: (n, din); K: (n, din); V: (n, dout) """
@@ -42,10 +40,10 @@ class Attn(nn.Module):
         X = X.view(-1, self.dim_in)
         Y = Y.view(-1, self.dim_out)
         Y_ = self.forward(X, X, Y)
-        l = torch.mean(F.mse_loss(Y, Y_))
-        return l
+        l = F.mse_loss(Y, Y_)
+        return l, Y_
 
-n, d = 1000, 1
+n, d = 1000, 3
 sigma = 2
 X = 20 * torch.rand((n, d), dtype=torch.float) - 10
 eps = sigma * torch.randn((n, 1), dtype=torch.float)
@@ -56,17 +54,32 @@ L_inv = L.inverse()
 
 """ get LS estimator of beta """
 beta_LS = (X.T @ X).inverse() @ X.T @ Y
-# plt.scatter(X, Y)
-# plt.plot(X, X@beta_LS)
-# plt.show()
+Y_LS = X @ beta_LS
 
 """ train attn """
-attn = Attn(d, 1)
+attn = Attn(dim_in=d, dim_out=1, normalized=False)
 for i in range(1000):
-    loss = attn.loss_LSP(X, Y)
+    loss, _ = attn.loss_LSP(X, Y)
     attn.optim.zero_grad()
     loss.backward()
     attn.optim.step()
     if i % 30:
         print(f"loss: {loss:.3f}")
-torch.save(attn, f"attn_{loss:.3f}.mdl")
+torch.save(attn, f"model/attn_{loss:.3f}.mdl")
+
+# """ load model """
+# attn:Attn = torch.load("model/attn_3.682.mdl")
+
+""" compare """
+if not attn.normalized:
+    Wq, Wk, Wv = attn.Wq.weight, attn.Wk.weight, attn.Wv.weight
+    beta_attn_eq = Wq.T @ (X @ Wk.T).T @ Y @ Wv.T / torch.sqrt(torch.tensor(attn.dim_in))
+    Y_attn = X @ beta_attn_eq.detach()
+    print(beta_attn_eq.T, "\n", beta_LS.T, "\n", beta.T)
+else:
+    _, Y_attn = attn.loss_LSP(X, Y)
+
+plt.scatter(X[:, 0], Y)
+plt.scatter(X[:, 0], Y_LS, color="yellow")
+plt.scatter(X[:, 0], Y_attn.detach(), color="orange")
+plt.show()

@@ -1,2 +1,4 @@
 torch.initial_seed: 89101659224000
 lr: 1e-2
+n, d = 100, 1
+sigma = 2
