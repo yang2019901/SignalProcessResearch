@@ -6,11 +6,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import numpy as np
 
-import pdb
+# for debug
+# import pdb
+
+torch.manual_seed(0)
 
 class Attn(nn.Module):
-    def __init__(self, dim_in, dim_out, normalized=False):
+    def __init__(self, dim_in, dim_out, normalized=False, lr=1e-3):
         super(Attn, self).__init__()
         self.Wq = nn.Linear(dim_in, dim_in, bias=False)
         self.Wk = nn.Linear(dim_in, dim_in, bias=False)
@@ -18,7 +22,7 @@ class Attn(nn.Module):
         self.dim_in = dim_in
         self.dim_out = dim_out
         self.normalized:bool = normalized
-        self.optim = torch.optim.Adam(self.parameters(), lr=3e-2)
+        self.optim = torch.optim.Adam(self.parameters(), lr=lr)
     
     def forward(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor):
         """ Q: (n, din); K: (n, din); V: (n, dout) """
@@ -43,43 +47,90 @@ class Attn(nn.Module):
         l = F.mse_loss(Y, Y_)
         return l, Y_
 
-n, d = 1000, 3
-sigma = 2
-X = 20 * torch.rand((n, d), dtype=torch.float) - 10
-eps = sigma * torch.randn((n, 1), dtype=torch.float)
-beta = 2 + torch.randn((d, 1), dtype=torch.float)
-Y = X@beta + eps
-L = torch.linalg.cholesky(X.T @ X)
-L_inv = L.inverse()
 
-""" get LS estimator of beta """
-beta_LS = (X.T @ X).inverse() @ X.T @ Y
-Y_LS = X @ beta_LS
+def plot_shaded_curve(losses, iters, label):
+    # 计算平均损失和标准差
+    mean_losses = np.mean(losses, axis=0)
+    std_losses = np.std(losses, axis=0)
 
-""" train attn """
-attn = Attn(dim_in=d, dim_out=1, normalized=False)
-for i in range(1000):
-    loss, _ = attn.loss_LSP(X, Y)
-    attn.optim.zero_grad()
-    loss.backward()
-    attn.optim.step()
-    if i % 30:
-        print(f"loss: {loss:.3f}")
-torch.save(attn, f"model/attn_{loss:.3f}.mdl")
+    # 绘制平均损失曲线
+    line, = plt.plot(iters, mean_losses, label=label)
+    # 添加阴影部分
+    plt.fill_between(iters, mean_losses-std_losses, mean_losses+std_losses, color=line.get_color(), alpha=0.2)
 
-# """ load model """
-# attn:Attn = torch.load("model/attn_3.682.mdl")
 
-""" compare """
-if not attn.normalized:
-    Wq, Wk, Wv = attn.Wq.weight, attn.Wk.weight, attn.Wv.weight
-    beta_attn_eq = Wq.T @ (X @ Wk.T).T @ Y @ Wv.T / torch.sqrt(torch.tensor(attn.dim_in))
-    Y_attn = X @ beta_attn_eq.detach()
-    print(beta_attn_eq.T, "\n", beta_LS.T, "\n", beta.T)
-else:
-    _, Y_attn = attn.loss_LSP(X, Y)
+def main():
+    def train_attn(attn:Attn, X, Y):
+        li_loss = []
+        for i in range(1000):
+            loss, _ = attn.loss_LSP(X, Y)
+            attn.optim.zero_grad()
+            loss.backward()
+            attn.optim.step()
+            if i % 50 == 0:
+                # print(f"loss: {loss:.3f}")
+                li_loss.append((i, loss.item()))
+        torch.save(attn, f"model/attn_{loss:.3f}.mdl")
+        return list(zip(*li_loss))
 
-plt.scatter(X[:, 0], Y)
-plt.scatter(X[:, 0], Y_LS, color="yellow")
-plt.scatter(X[:, 0], Y_attn.detach(), color="orange")
-plt.show()
+    def get_attn_eq(X, Y, attn:Attn):
+        Wq, Wk, Wv = attn.Wq.weight, attn.Wk.weight, attn.Wv.weight
+        beta_attn_eq = Wq.T @ (X @ Wk.T).T @ Y @ Wv.T / torch.sqrt(torch.tensor(attn.dim_in))
+        beta_attn_eq = beta_attn_eq.detach()
+        return beta_attn_eq
+
+    n, d = 100, 10
+    sigma = 1
+
+    losses = []
+    losses_norm = []
+    iters = []
+    errs = []
+    for _ in range(10):
+        """ generate data """
+        X = 20 * torch.rand((n, d), dtype=torch.float) - 10
+        eps = sigma * torch.randn((n, 1), dtype=torch.float)
+        beta = torch.randn((d, 1), dtype=torch.float)
+        Y = X @ beta + eps
+
+        """ define model """
+        attn = Attn(dim_in=d, dim_out=1, normalized=False, lr=8e-4)
+        attn_norm = Attn(dim_in=d, dim_out=1, normalized=True, lr=5e-3)
+
+        """ train model """
+        loss1 = train_attn(attn, X, Y)
+        loss2 = train_attn(attn_norm, X, Y)
+
+        beta_attn_eq = get_attn_eq(X, Y, attn)
+        beta_LS = (X.T @ X).inverse() @ X.T @ Y
+        print(f"beta_attn_eq: {beta_attn_eq}")
+        print(f"beta_LS: {beta_LS}")
+        print(f"beta: {beta}")
+        print(f"dist of beta: {torch.dist(beta_LS, beta_attn_eq)}")
+
+        iters = loss1[0]
+        losses.append(loss1[1])
+        losses_norm.append(loss2[1])
+
+        errs.append(torch.dist(beta_LS, beta_attn_eq).item() / torch.norm(beta_LS).item())
+
+    print("----------evaluation----------")
+
+    plt.figure()
+    plot_shaded_curve(losses, iters, "attn($h=id$)")
+    plot_shaded_curve(losses_norm, iters, "attn($h=softmax$)")
+    plt.xlabel("iteration")
+    plt.ylabel("loss")
+    plt.yscale('log')
+    plt.legend()
+    plt.title(f"loss curve (different normalization, $n={n}, d={d}$)")
+
+    plt.figure()
+    bars = plt.bar(range(len(errs)), errs)
+    plt.bar_label(bars, fmt='%.2g')
+    plt.xlabel("experiment")
+    plt.ylabel("error rate")
+    plt.title(r"error rate of $\hat{\beta}_{eq}$ and $\hat{\beta}_{LS}$")
+
+    plt.show()
+main()
